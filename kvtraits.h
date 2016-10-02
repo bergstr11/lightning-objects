@@ -147,7 +147,7 @@ static_assert(sizeof(size_t) == TypeTraits<size_t>::byteSize, "size_t: byteSize 
 
 class Transaction;
 class WriteTransaction;
-class PropertyAccessBase;
+struct PropertyAccessBase;
 class ObjectBuf;
 class PrepareData;
 
@@ -156,15 +156,12 @@ enum class StoreMode {force_none, force_all, force_buffer, force_property};
 enum class StoreLayout {all_embedded, embedded_key, property, none};
 
 /**
- * abstract superclass for classes that handle serializing mapped values to the datastore
+ * base information about a property store
  */
-struct StoreAccessBase
+struct StoreInfo
 {
   const StoreLayout layout;
   size_t fixedSize;
-
-  StoreAccessBase(StoreLayout layout=StoreLayout::all_embedded, size_t fixedSize=0)
-      : layout(layout), fixedSize(fixedSize) {}
 
   /**
    * called at schema initialization. Override if applicable
@@ -185,12 +182,26 @@ struct StoreAccessBase
    */
   virtual size_t size(StoreId storeId, ObjectBuf &buf) const = 0;
 
+protected:
+  StoreInfo(StoreLayout layout=StoreLayout::all_embedded, size_t fixedSize=0)
+    : layout(layout), fixedSize(fixedSize) {}
+};
+
+/**
+ * abstract superclass for classes that handle serializing mapped values to the datastore
+ */
+template <typename T>
+struct StoreAccessBase : public StoreInfo
+{
+  StoreAccessBase(StoreLayout layout=StoreLayout::all_embedded, size_t fixedSize=0)
+      : StoreInfo(layout, fixedSize) {}
+
   /**
    * determine the size from a live object
    *
    * @return the buffer size required to save the given property value
    */
-  virtual size_t size(StoreId storeId, void *obj, const PropertyAccessBase *pa) {return 0;}
+  virtual size_t size(StoreId storeId, T *obj, const PropertyAccessBase *pa) const {return 0;}
 
   /**
    * prepare an update for the given object property. This function is called on dependent objects (objects which
@@ -201,10 +212,8 @@ struct StoreAccessBase
    * @param pd prepare data cache used by storage objects
    * @param obj the object about to be saved
    * @param pa the property about to be saved
-   * @return the same as size(buf)
    */
-  virtual size_t prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, void *obj, const PropertyAccessBase *pa) {
-    return size(storeId, buf);
+  virtual void prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa) const {
   }
 
   /**
@@ -215,35 +224,33 @@ struct StoreAccessBase
    * @param tr the write transaction
    * @param buf the object data as currently saved
    * @param pa the property represented by this storage
-   * @return the same as size(buf)
    */
-  virtual size_t prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa) {
-    return size(storeId, buf);
+  virtual void prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa) const {
   }
 
   /** default member intialization does nothing*/
-  virtual void initMember(WriteTransaction *tr, void *obj, const PropertyAccessBase *pa) {
+  virtual void initMember(WriteTransaction *tr, T *obj, const PropertyAccessBase *pa) const {
   }
 
   virtual void save(WriteTransaction *tr,
                     ClassId classId, ObjectId objectId,
-                    void *obj,
+                    T *obj,
                     PrepareData &pd,
                     const PropertyAccessBase *pa,
-                    StoreMode mode=StoreMode::force_none) = 0;
+                    StoreMode mode=StoreMode::force_none) const = 0;
 
   virtual void load(Transaction *tr,
                     ReadBuf &buf,
                     ClassId classId, ObjectId objectId,
-                    void *obj, const PropertyAccessBase *pa,
-                    StoreMode mode=StoreMode::force_none) = 0;
+                    T *obj, const PropertyAccessBase *pa,
+                    StoreMode mode=StoreMode::force_none) const = 0;
 };
 
 /**
  * storage access class that stores to dev/null
  */
-struct NullStorage : public StoreAccessBase {
-  NullStorage() : StoreAccessBase(StoreLayout::none, 0) { }
+struct NullStorage : public StoreAccessBase<void> {
+  NullStorage() : StoreAccessBase<void>(StoreLayout::none, 0) { }
 
   size_t size(StoreId storeId, ObjectBuf &buf) const override { return 0; }
 
@@ -252,37 +259,39 @@ struct NullStorage : public StoreAccessBase {
             void *obj,
             PrepareData &pb,
             const PropertyAccessBase *pa,
-            StoreMode mode = StoreMode::force_none) { }
+            StoreMode mode = StoreMode::force_none) const override { }
 
   void load(Transaction *tr,
             ReadBuf &buf,
             ClassId classId, ObjectId objectId,
             void *obj, const PropertyAccessBase *pa,
-            StoreMode mode = StoreMode::force_none) { }
+            StoreMode mode = StoreMode::force_none) const override { }
 };
 
 /**
  * abstract superclass for all Store Access classes that represent mapped-object valued properties where
  * the referred-to object is saved individually and key value saved in the enclosing object's buffer
  */
-struct StoreAccessEmbeddedKey : public StoreAccessBase
+template <typename T>
+struct StoreAccessEmbeddedKey : public StoreAccessBase<T>
 {
-  StoreAccessEmbeddedKey() : StoreAccessBase(StoreLayout::embedded_key, ObjectKey_sz) {}
+  StoreAccessEmbeddedKey() : StoreAccessBase<T>(StoreLayout::embedded_key, ObjectKey_sz) {}
 
   size_t size(StoreId storeId, ObjectBuf &buf) const override {return ObjectKey_sz;}
-  size_t size(StoreId storeId, void *obj, const PropertyAccessBase *pa) override {return ObjectKey_sz;}
+  size_t size(StoreId storeId, T *obj, const PropertyAccessBase *pa) const override {return ObjectKey_sz;}
 };
 
 /**
  * abstract superclass for all Store Access classes that represent mapped-object valued properties that are saved
  * under a property key, with nothing saved in the enclosing object's buffer
  */
-struct StoreAccessPropertyKey: public StoreAccessBase
+template <typename T>
+struct StoreAccessPropertyKey: public StoreAccessBase<T>
 {
-  StoreAccessPropertyKey() : StoreAccessBase(StoreLayout::property) {}
+  StoreAccessPropertyKey() : StoreAccessBase<T>(StoreLayout::property) {}
 
   size_t size(StoreId storeId, ObjectBuf &buf) const override {return 0;}
-  size_t size(StoreId storeId, void *obj, const PropertyAccessBase *pa) override {return 0;}
+  size_t size(StoreId storeId, T *obj, const PropertyAccessBase *pa) const override {return 0;}
 };
 
 /**
@@ -476,18 +485,17 @@ struct PropertyAccessBase
   bool enabled = true;
   ClassId classId[MAX_DATABASES];
   PropertyId id = 0;
-  StoreAccessBase *storage;
+  StoreInfo *storeinfo;
   const PropertyType type;
   const char *inverse_name;
 
-  PropertyAccessBase(const char * name, StoreAccessBase *storage, const PropertyType &type)
-      : name(name), storage(storage), type(type), inverse_name(nullptr) {}
+  PropertyAccessBase(const char * name, StoreInfo *storage, const PropertyType &type)
+      : name(name), storeinfo(storage), type(type), inverse_name(nullptr) {}
 
   PropertyAccessBase(const char * name, const char * inverse, const PropertyType &type)
-      : name(name), storage(new NullStorage()), type(type), inverse_name(inverse) {}
+      : name(name), storeinfo(new NullStorage()), type(type), inverse_name(inverse) {}
 
-  virtual bool same(void *obj, ObjectId oid) {return false;}
-  virtual ~PropertyAccessBase() {delete storage;}
+  virtual ~PropertyAccessBase() {delete storeinfo;}
 
   virtual void setup(Properties *props) const {}
 };
@@ -497,19 +505,20 @@ struct PropertyAccessBase
  */
 template <typename O, typename P>
 struct PropertyAccess : public PropertyAccessBase {
-  PropertyAccess(const char * name, StoreAccessBase *storage, const PropertyType &type)
+  PropertyAccess(const char * name, StoreAccessBase<O> *storage, const PropertyType &type)
       : PropertyAccessBase(name, storage, type) {}
   PropertyAccess(const char * name, const char * inverse, const PropertyType &type)
       : PropertyAccessBase(name, inverse, type) {}
   virtual void set(O &o, P val) const = 0;
   virtual P get(O &o) const = 0;
+  virtual bool same(O *obj, ObjectId oid) {return false;}
 };
 
 /**
  * property accessor that performs direct assignment
  */
 template <typename O, typename P, P O::*p> struct PropertyAssign : public PropertyAccess<O, P> {
-  PropertyAssign(const char * name, StoreAccessBase *storage, const PropertyType &type)
+  PropertyAssign(const char * name, StoreAccessBase<O> *storage, const PropertyType &type)
       : PropertyAccess<O, P>(name, storage, type) {}
   PropertyAssign(const char * name, const char * inverse, const PropertyType &type)
       : PropertyAccess<O, P>(name, inverse, type) {}
@@ -559,8 +568,8 @@ public:
   }
 
   bool preparesUpdates(StoreId storeId, ClassId classId) {
-    for(int i=0; i<numProps; i++)
-      if((*decl_props[i])->storage->preparesUpdates(storeId, classId))
+    for(unsigned i=0; i<numProps; i++)
+      if((*decl_props[i])->storeinfo->preparesUpdates(storeId, classId))
         return true;
     return false;
   }
@@ -613,8 +622,8 @@ public:
     //general storage initialization
     for(unsigned i=0; i<numProps; i++) {
       const PropertyAccessBase *pa = *decl_props[i];
-      if (pa->enabled && pa->storage) {
-        pa->storage->init(pa);
+      if (pa->enabled && pa->storeinfo) {
+        pa->storeinfo->init(pa);
       }
     }
 
@@ -627,13 +636,13 @@ public:
     for(unsigned i=0; i<numProps; i++) {
       const PropertyAccessBase *pa = *decl_props[i];
       if(pa->enabled) {
-        switch(pa->storage->layout) {
+        switch(pa->storeinfo->layout) {
           case StoreLayout::all_embedded: {
-            if (!pa->storage->fixedSize) {
+            if (!pa->storeinfo->fixedSize) {
               fixedSize = 0;
               return;
             }
-            fixedSize += pa->storage->fixedSize;
+            fixedSize += pa->storeinfo->fixedSize;
             break;
           }
           case StoreLayout::embedded_key:
@@ -862,8 +871,8 @@ struct ClassInfo : public AbstractClassInfo
   Properties * (* const getProperties)(StoreId storeId, ClassId classId);
   bool (* const addSize)(StoreId storeId, T *obj, const PropertyAccessBase *pa, size_t &size, unsigned flags);
   bool (* const get_objectkey)(const std::shared_ptr<T> &obj, ObjectKey *&key, unsigned flags);
-  bool (* const prep_delete)(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, size_t &size, unsigned flags);
-  bool (* const prep_update)(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, size_t &size, unsigned flags);
+  bool (* const prep_delete)(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, unsigned flags);
+  bool (* const prep_update)(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, unsigned flags);
   bool (* const save)(StoreId storeId, WriteTransaction *wtr,
                       ClassId classId, ObjectId objectId, T *obj, PrepareData &pd, const PropertyAccessBase *pa, StoreMode mode, unsigned flags);
   bool (* const load)(StoreId storeId, Transaction *tr, ReadBuf &buf,
@@ -915,21 +924,18 @@ struct ClassInfo : public AbstractClassInfo
  * subclass of this class. All calls to access/update mapped object properties should go through here and will be
  * dispatched to the correct location. The correct location is determined by the classId which is uniquely assigned
  * to each mapped class. Many calls here will first determine the correct ClassTraits instance, and from there
- * hand over to non-templated API's, like PropertyAccessBase's API. This ensures that the cast operations (at handover
- * to the non-templated API and thereafter before actual processing) happen on the exact type level, i.e., at handover,
- * the ClassTraits template parameter type T is always the exact type of the handed-over object. Thus the T/void/T
- * cast sequence is without issues.
+ * hand over to specific pprocessing. This ensures that the cast operation at handover from the non-templated PropertyAccessBase
+ * to the templated StoreAccessBase happen on the exact type level, i.e., at handover,
+ * the ClassTraits template parameter type T is always the exact type of the handed-over object. Thus the cast is without issues.
  *
  * Heres an illustration:
  *
  * - mapped type hierarchy: S <- T (T subclasses S)
  * - persistent operation is exectuted with template parameter type S and an operand of type T
- * - the operation needs to hand over to a property mapping (PropertyAccessBase), which is not templated and therefore
- *   takes (void *). Let the property be defined in ClassTraits<T>, while the operation uses ClassTraits<S>
- * - inside PropertyAccessBase, the pointer is cast back to T to perform actual processing
- * ==> this does not work. The cast S* -> void* -> T* destroys the object, because the compiler cannot support it.
- * ==> we therefore perform lookup by classId to determine the exact match, which is ClassTraits<T>.
- * ==> the cast T* -> void* -> T* is harmless
+ * - the operation needs to hand over to a property mapping resp. StoreAccessBase<T>. For this purpose, the
+ *   StoreInfo inside the property mapping must be cast down.
+ * - we therefore perform lookup by classId to determine the exact match, which is ClassTraits<T>. Here the cast
+ *   StoreInfo* -> StoreAccessBase<T>* is harmless
  */
 template <typename T, typename SUP=EmptyClass>
 class ClassTraitsBase
@@ -960,6 +966,14 @@ class ClassTraitsBase
       addSize(storeId, obj, pa, size);
     }
     return size;
+  }
+
+  /**
+   * @param pa a property mapping
+   * @return pa->storeinfo cast to the correct StorageAccessBase type
+   */
+  static inline const StoreAccessBase<T>* storeaccess(const PropertyAccessBase *pa) {
+    return static_cast<const StoreAccessBase<T> *>(pa->storeinfo);
   }
 
 public:
@@ -1061,7 +1075,7 @@ public:
   static bool addSize(StoreId storeId, T *obj, const PropertyAccessBase *pa, size_t &size, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      size += pa->storage->size(storeId, obj, pa);
+      size += storeaccess(pa)->size(storeId, obj, pa);
       return true;
     }
     else if(pa->classId[storeId]) {
@@ -1100,7 +1114,7 @@ public:
   static bool initMember(StoreId storeId, WriteTransaction *tr, T &obj, const PropertyAccessBase *pa, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      pa->storage->initMember(tr, &obj, pa);
+      storeaccess(pa)->initMember(tr, &obj, pa);
       return true;
     }
     else if(pa->classId[storeId]) {
@@ -1111,42 +1125,38 @@ public:
     return false;
   }
 
-  static size_t prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa)
+  static void prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa)
   {
-    size_t size;
-    if(!prep_update(storeId, buf, pd, obj, pa, size)) throw invalid_classid_error(pa->classId[storeId]);
-    return size;
+    if(!prep_update(storeId, buf, pd, obj, pa)) throw invalid_classid_error(pa->classId[storeId]);
   }
-  static bool prep_update(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, size_t &size, unsigned flags=FLAGS_ALL)
+  static bool prep_update(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      size = pa->storage->prepareUpdate(storeId, buf, pd, obj, pa);
+      storeaccess(pa)->prepareUpdate(storeId, buf, pd, obj, pa);
       return true;
     }
     else if(pa->classId[storeId]) {
-      if(UP && ClassTraits<SUP>::prep_update(storeId, buf, pd, obj, pa, size, FLAG_UP))
+      if(UP && ClassTraits<SUP>::prep_update(storeId, buf, pd, obj, pa, FLAG_UP))
         return true;
-      return DN && RESOLVE_SUB(pa->classId[storeId])->prep_update(storeId, buf, pd, obj, pa, size, FLAG_DN);
+      return DN && RESOLVE_SUB(pa->classId[storeId])->prep_update(storeId, buf, pd, obj, pa, FLAG_DN);
     }
     return false;
   }
 
-  static size_t prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa)
+  static void prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa)
   {
-    size_t size;
-    if(!prep_delete(storeId, tr, buf, pa, size)) throw invalid_classid_error(pa->classId[storeId]);
-    return size;
+    if(!prep_delete(storeId, tr, buf, pa)) throw invalid_classid_error(pa->classId[storeId]);
   }
-  static bool prep_delete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, size_t &size, unsigned flags=FLAGS_ALL)
+  static bool prep_delete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      size = pa->storage->prepareDelete(storeId, tr, buf, pa);
+      storeaccess(pa)->prepareDelete(storeId, tr, buf, pa);
       return true;
     }
     else if(pa->classId[storeId]) {
-      if(UP && ClassTraits<SUP>::prep_delete(storeId, tr, buf, pa, size, FLAG_UP))
+      if(UP && ClassTraits<SUP>::prep_delete(storeId, tr, buf, pa, FLAG_UP))
         return true;
-      return DN && RESOLVE_SUB(pa->classId[storeId])->prep_delete(storeId, tr, buf, pa, size, FLAG_DN);
+      return DN && RESOLVE_SUB(pa->classId[storeId])->prep_delete(storeId, tr, buf, pa, FLAG_DN);
     }
     return false;
   }
@@ -1155,7 +1165,7 @@ public:
                    ClassId classId, ObjectId objectId, T *obj, PrepareData &pd, const PropertyAccessBase *pa, StoreMode mode, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      pa->storage->save(tr, classId, objectId, obj, pd, pa, mode);
+      storeaccess(pa)->save(tr, classId, objectId, obj, pd, pa, mode);
       return true;
     }
     else if(pa->classId[storeId]) {
@@ -1171,7 +1181,7 @@ public:
                    StoreMode mode=StoreMode::force_none, unsigned flags=FLAGS_ALL)
   {
     if(pa->classId[storeId] == traits_data(storeId).classId) {
-      pa->storage->load(tr, buf, classId, objectId, obj, pa, mode);
+      storeaccess(pa)->load(tr, buf, classId, objectId, obj, pa, mode);
       return true;
     }
     else if(pa->classId[storeId]) {
@@ -1321,18 +1331,16 @@ struct ClassTraits<EmptyClass>
   static bool get_objectkey(const std::shared_ptr<T> &obj, ObjectKey *&key, unsigned flags) {
     return false;
   }
-  static size_t prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa) {
-    return 0;
+  static void prepareDelete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa) {
   }
-  static bool prep_delete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, size_t &size, unsigned flags=0) {
+  static bool prep_delete(StoreId storeId, WriteTransaction *tr, ObjectBuf &buf, const PropertyAccessBase *pa, unsigned flags=0) {
     return false;
   }
   template <typename T>
-  static size_t prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa) {
-    return 0;
+  static void prepareUpdate(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa) {
   }
   template <typename T>
-  static bool prep_update(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, size_t &size, unsigned flags=0) {
+  static bool prep_update(StoreId storeId, ObjectBuf &buf, PrepareData &pd, T *obj, const PropertyAccessBase *pa, unsigned flags=0) {
     return false;
   }
   template <typename T>
